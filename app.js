@@ -1,0 +1,481 @@
+var mongojs = require("mongojs");
+var db = mongojs('localhost:27017/RhysCW', ['account','progress', 'highscore']);
+
+var express = require('express');
+var app = express();
+var serv = require('http').Server(app);
+var path = require('path');
+
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/',function(req, res) {
+	res.sendFile(__dirname + '/client/index.html');
+});
+app.use('/client',express.static(__dirname + '/client'));
+
+serv.listen(process.env.PORT || 2000);
+console.log("Server started on port 2000 - Go and shoot some other penguins and get on the leadboard!");
+
+var SOCKET_LIST = {};
+
+var Entity = function(param){
+	var self = {
+		x:250,
+		y:250,
+		spdX:0,
+		spdY:0,
+		id:"",
+		map:'snow1',
+	}
+	if(param){
+		if(param.x)
+			self.x = param.x;
+		if(param.y)
+			self.y = param.y;
+		if(param.map)
+			self.map = param.map;
+		if(param.id)
+			self.id = param.id;		
+	}
+	
+	self.update = function(){
+		self.updatePosition();
+	}
+	self.updatePosition = function(){
+		self.x += self.spdX;
+		self.y += self.spdY;
+	}
+	self.getDistance = function(pt){
+		return Math.sqrt(Math.pow(self.x-pt.x,2) + Math.pow(self.y-pt.y,2));
+	}
+	
+	return self;
+	
+	
+}
+
+var Player = function(param){
+	var self = Entity(param);
+	self.number = "" + Math.floor(10 * Math.random());
+	self.username = param.username;
+	self.highscore = param.highscore
+	self.pressingRight = false;
+	self.pressingLeft = false;
+	self.pressingUp = false;
+	self.pressingDown = false;
+	self.pressingAttack = false;
+	self.mouseAngle = 0;
+	self.maxSpd = 10;
+	self.hp = 20;
+	self.hpMax = 20;
+	self.score = 0;
+	
+	var super_update = self.update;
+	self.update = function(){
+		self.updateSpd();
+		
+		super_update();
+		
+		if(self.pressingAttack){
+			self.shootBullet(self.mouseAngle);
+		}
+	}
+	self.shootBullet = function(angle){
+		Bullet({
+			parent:self.id,
+			angle:angle,
+			x:self.x,
+			y:self.y,
+			map:self.map,
+		});
+	}
+	
+	self.updateSpd = function(){
+
+		if(self.pressingRight)
+			//x 
+            if(self.x > 1280) {
+                self.spdX = 0;
+            }
+            else{
+                self.spdX = self.maxSpd;
+            }
+        else if(self.pressingLeft)
+            if(self.x < 30) {
+                self.spdX = 0;
+            }
+            else{
+                self.spdX = -self.maxSpd;
+            }
+        else {
+            self.spdX = 0;
+        }
+        //y 
+        if(self.pressingUp)
+            if(self.y < 0) {
+                self.spdY = 0;
+
+            }
+            else{
+                self.spdY = -self.maxSpd;
+            }
+        else if(self.pressingDown)
+            if(self.y > 720) {
+                self.spdY = 0;
+
+            }
+            else{
+                self.spdY = self.maxSpd;
+            }
+        else{
+            self.spdY = 0;
+        }	
+	}
+	
+	self.getInitPack = function(){
+		return {
+			id:self.id,
+			x:self.x,
+			y:self.y,	
+			number:self.number,	
+			hp:self.hp,
+			hpMax:self.hpMax,
+			score:self.score,
+			map:self.map,
+		};		
+	}
+	self.getUpdatePack = function(){
+		return {
+			id:self.id,
+			x:self.x,
+			y:self.y,
+			hp:self.hp,
+			score:self.score,
+			map:self.map,
+		}	
+	}
+	
+	Player.list[self.id] = self;
+	
+	initPack.player.push(self.getInitPack());
+	return self;
+}
+Player.list = {};
+Player.onConnect = function(socket,username,highscore){
+	var map = 'snow1';
+	if(Math.random() < 0.5)
+		map = 'snow2';
+	var player = Player({
+		username:username,
+		highscore:highscore,
+		id:socket.id,
+		map:map,
+	});
+	socket.on('keyPress',function(data){
+		if(data.inputId === 'left')
+			player.pressingLeft = data.state;
+		else if(data.inputId === 'right')
+			player.pressingRight = data.state;
+		else if(data.inputId === 'up')
+			player.pressingUp = data.state;
+		else if(data.inputId === 'down')
+			player.pressingDown = data.state;
+		else if(data.inputId === 'attack')
+			player.pressingAttack = data.state;
+		else if(data.inputId === 'mouseAngle')
+			player.mouseAngle = data.state;
+	});
+	
+	socket.on('changeMap',function(data){
+		if(player.map === 'snow2')
+			player.map = 'snow1';
+		else
+			player.map = 'snow2';
+	});
+	
+	socket.on('sendMsgToServer',function(data){
+		for(var i in SOCKET_LIST){
+			SOCKET_LIST[i].emit('addToChat',player.username + ': ' + data);
+		}
+	});
+	socket.on('sendPmToServer',function(data){ //data:{username,message}
+		var recipientSocket = null;
+		for(var i in Player.list)
+			if(Player.list[i].username === data.username)
+				recipientSocket = SOCKET_LIST[i];
+		if(recipientSocket === null){
+			socket.emit('addToChat','The player ' + data.username + ' is not online.');
+		} else {
+			recipientSocket.emit('addToChat','From ' + player.username + ':' + data.message);
+			socket.emit('addToChat','To ' + data.username + ':' + data.message);
+		}
+	});
+	
+	socket.emit('init',{
+		selfId:socket.id,
+		player:Player.getAllInitPack(),
+		bullet:Bullet.getAllInitPack(),
+	})
+}
+Player.getAllInitPack = function(){
+	var players = [];
+	for(var i in Player.list)
+		players.push(Player.list[i].getInitPack());
+	return players;
+}
+
+Player.onDisconnect = function(socket){
+	delete Player.list[socket.id];
+	removePack.player.push(socket.id);
+}
+Player.update = function(){
+	var pack = [];
+	for(var i in Player.list){
+		var player = Player.list[i];
+		player.update();
+		pack.push(player.getUpdatePack());		
+	}
+	return pack;
+}
+
+//Leaderboard Get Route
+app.get('/leaderboard', function(req, res){
+	//console.log('Leaderboard Updated');
+	db.highscore.find({},
+	function(err, leaderboard){
+		if(err){
+			console.log("There's a problem");
+		} else {
+			res.json(leaderboard);
+		}
+	});
+});
+
+
+var Bullet = function(param){
+	var self = Entity(param);
+	self.id = Math.random();
+	self.angle = param.angle;
+	self.spdX = Math.cos(param.angle/180*Math.PI) * 12;
+	self.spdY = Math.sin(param.angle/180*Math.PI) * 12;
+	self.parent = param.parent;
+	
+	self.timer = 0;
+	self.toRemove = false;
+	var super_update = self.update;
+	self.update = function(){
+		if(self.timer++ > 100)
+			self.toRemove = true;
+		super_update();
+		
+		for(var i in Player.list){
+			var p = Player.list[i];
+			if(self.map === p.map && self.getDistance(p) < 32 && self.parent !== p.id){
+				p.hp -= 1;
+								
+				if(p.hp <= 0){
+					var shooter = Player.list[self.parent];
+					if(shooter)
+						shooter.score += 1;
+					
+					/* Note to self; This did not work for future reference.
+					
+					if(!db.highscore.find({username: shooter.username}){
+						
+						db.highscore.update({username:shooter.username,highscore:shooter.score},function(err){});
+						
+					} else {
+						
+						db.highscore.insert({username:shooter.username,highscore:shooter.score},function(err){});
+						
+					} */
+					
+					db.highscore.findOne({username : shooter.username}, function(err, doc) {
+					if( doc == null ) {
+					db.highscore.insert({username:shooter.username,highscore:shooter.score},function(err){});
+					} else {
+					// db.highscore.update({username:shooter.username,highscore:shooter.score},function(err){}); - Didn't increment the scores.
+					
+					db.highscore.update({username:shooter.username}, {$inc: {highscore: 1}, $set: {username:shooter.username}}, {upsert: true}); // Note to self; don't delete this, it works!
+					}
+					
+					})
+					
+					p.hp = p.hpMax;
+					p.x = Math.random() * 1260;
+					p.y = Math.random() * 700;				
+				}
+				self.toRemove = true;
+			}
+		}
+	}
+	self.getInitPack = function(){
+		return {
+			id:self.id,
+			x:self.x,
+			y:self.y,
+			map:self.map,
+		};
+	}
+	self.getUpdatePack = function(){
+		return {
+			id:self.id,
+			x:self.x,
+			y:self.y,		
+		};
+	}
+	
+	Bullet.list[self.id] = self;
+	initPack.bullet.push(self.getInitPack());
+	return self;
+}
+Bullet.list = {};
+
+Bullet.update = function(){
+	var pack = [];
+	for(var i in Bullet.list){
+		var bullet = Bullet.list[i];
+		bullet.update();
+		if(bullet.toRemove){
+			delete Bullet.list[i];
+			removePack.bullet.push(bullet.id);
+		} else
+			pack.push(bullet.getUpdatePack());		
+	}
+	return pack;
+}
+
+Bullet.getAllInitPack = function(){
+	var bullets = [];
+	for(var i in Bullet.list)
+		bullets.push(Bullet.list[i].getInitPack());
+	return bullets;
+}
+
+var DEBUG = true;
+
+var isValidPassword = function(data,cb){
+	
+    db.account.find({username:data.username,password:data.password},function(err,res){
+		if(res.length > 0)
+			cb(true);
+		else
+			cb(false);
+	});
+}
+var isUsernameTaken = function(data,cb){
+	
+	db.account.find({username:data.username},function(err,res){
+		if(res.length > 0)
+			cb(true);
+		else
+			cb(false);
+	});
+}
+var addUser = function(data,cb){
+	
+	db.account.insert({username:data.username,password:data.password},function(err){
+		cb();
+	});
+}
+
+/* var leaderboardScore = function(data,cb){
+	
+	db.highscore.find({},function(err,res){
+		if(res.length > 0)
+			cb(res);
+		else
+			cb(false);
+	});
+} */
+
+var io = require('socket.io')(serv,{});
+io.sockets.on('connection', function(socket){
+	socket.id = Math.random();
+	SOCKET_LIST[socket.id] = socket;
+	
+	socket.on('signIn',function(data){ //{username,password}
+		isValidPassword(data,function(res){
+			if(res){
+				Player.onConnect(socket,data.username);
+				socket.emit('signInResponse',{success:true});
+			} else {
+				socket.emit('signInResponse',{success:false});			
+			}
+		});
+	});
+	socket.on('signUp',function(data){
+		isUsernameTaken(data,function(res){
+			if(res){
+				socket.emit('signUpResponse',{success:false});		
+			} else {
+				addUser(data,function(){
+					socket.emit('signUpResponse',{success:true});					
+				});
+			}
+		});		
+	});
+	
+	
+	socket.on('disconnect',function(){
+		delete SOCKET_LIST[socket.id];
+		Player.onDisconnect(socket);
+	});
+	
+	socket.on('evalServer',function(data){
+		if(!DEBUG)
+			return;
+		var res = eval(data);
+		socket.emit('evalAnswer',res);		
+	});
+	
+	
+	
+});
+
+var initPack = {player:[],bullet:[]};
+var removePack = {player:[],bullet:[]};
+
+
+setInterval(function(){
+	var pack = {
+		player:Player.update(),
+		bullet:Bullet.update(),
+	}
+	
+	for(var i in SOCKET_LIST){
+		var socket = SOCKET_LIST[i];
+		socket.emit('init',initPack);
+		socket.emit('update',pack);
+		socket.emit('remove',removePack);
+	}
+	initPack.player = [];
+	initPack.bullet = [];
+	removePack.player = [];
+	removePack.bullet = [];
+	
+},1000/25);
+
+/*
+var profiler = require('v8-profiler');
+var fs = require('fs');
+var startProfiling = function(duration){
+	profiler.startProfiling('1', true);
+	setTimeout(function(){
+		var profile1 = profiler.stopProfiling('1');
+		
+		profile1.export(function(error, result) {
+			fs.writeFile('./profile.cpuprofile', result);
+			profile1.delete();
+			console.log("Profile saved.");
+		});
+	},duration);	
+}
+startProfiling(10000);
+*/
+
+
+
+
+
+
+
